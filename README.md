@@ -4,7 +4,7 @@ InnoPool’s custom TIG benchmarker slave: stock protocol, live telemetry, fast
 re-poll, and a local status dashboard.
 
 ```bash
-git clone git@github.com:rootztigmod/innopool-slave.git
+git clone https://github.com/rootztigmod/innopool-slave.git
 cd innopool-slave
 cp .env.example .env
 # edit .env — at least SLAVE_NAME, NUM_WORKERS
