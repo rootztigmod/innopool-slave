@@ -1,0 +1,15 @@
+FROM python:3.13-slim
+
+WORKDIR /app
+
+COPY requirements.txt requirements.txt
+RUN pip3 install -r requirements.txt --no-cache-dir
+
+RUN apt-get update && apt-get install -y docker.io \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+COPY common common
+COPY main.py main.py
+COPY dashboard dashboard
+
+CMD ["python", "main.py"]

@@ -1,0 +1,66 @@
+services:
+  slave:
+    build: .
+    image: innopool-slave:local
+    ports:
+      - "${DASHBOARD_HOST_PORT:-8787}:8787"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${ALGORITHMS_DIR}:/app/algorithms
+      - ${RESULTS_DIR}:/app/results
+    environment:
+      - VERBOSE=${VERBOSE:-}
+      - SLAVE_NAME=${SLAVE_NAME}
+      - MASTER_PORT=${MASTER_PORT}
+      - MASTER_IP=${MASTER_IP}
+      - TTL=${TTL}
+      - NUM_WORKERS=${NUM_WORKERS}
+      - DASHBOARD_PORT=8787
+      - DASHBOARD_HOST=0.0.0.0
+      - INNOPOOL_SLAVE_VERSION=${INNOPOOL_SLAVE_VERSION:-innopool-slave/0.1.4}
+    restart: unless-stopped
+
+  satisfiability:
+    image: ghcr.io/tig-foundation/tig-monorepo/satisfiability/runtime:${TIG_VERSION}
+    container_name: satisfiability
+    volumes:
+      - ${ALGORITHMS_DIR}:/app/algorithms
+      - ${RESULTS_DIR}:/app/results
+    command: ["sleep", "infinity"]
+    restart: unless-stopped
+
+  vehicle_routing:
+    image: ghcr.io/tig-foundation/tig-monorepo/vehicle_routing/runtime:${TIG_VERSION}
+    container_name: vehicle_routing
+    volumes:
+      - ${ALGORITHMS_DIR}:/app/algorithms
+      - ${RESULTS_DIR}:/app/results
+    command: ["sleep", "infinity"]
+    restart: unless-stopped
+
+  knapsack:
+    image: ghcr.io/tig-foundation/tig-monorepo/knapsack/runtime:${TIG_VERSION}
+    container_name: knapsack
+    volumes:
+      - ${ALGORITHMS_DIR}:/app/algorithms
+      - ${RESULTS_DIR}:/app/results
+    command: ["sleep", "infinity"]
+    restart: unless-stopped
+
+  job_scheduling:
+    image: ghcr.io/tig-foundation/tig-monorepo/job_scheduling/runtime:${TIG_VERSION}
+    container_name: job_scheduling
+    volumes:
+      - ${ALGORITHMS_DIR}:/app/algorithms
+      - ${RESULTS_DIR}:/app/results
+    command: ["sleep", "infinity"]
+    restart: unless-stopped
+
+  energy_arbitrage:
+    image: ghcr.io/tig-foundation/tig-monorepo/energy_arbitrage/runtime:${TIG_VERSION}
+    container_name: energy_arbitrage
+    volumes:
+      - ${ALGORITHMS_DIR}:/app/algorithms
+      - ${RESULTS_DIR}:/app/results
+    command: ["sleep", "infinity"]
+    restart: unless-stopped

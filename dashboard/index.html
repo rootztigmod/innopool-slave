@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>InnoPool Slave</title>
+  <link rel="stylesheet" href="/styles.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+</head>
+<body>
+  <div class="bg"></div>
+  <main class="shell">
+    <header class="hero">
+      <p class="brand">InnoPool</p>
+      <h1 id="slave-name">—</h1>
+      <p class="meta">
+        <span id="version">—</span>
+        <span class="dot">·</span>
+        <span id="master">—</span>
+      </p>
+    </header>
+
+    <section class="state-row">
+      <div id="state-chip" class="state-chip idle">Waiting</div>
+      <p id="updated" class="updated">—</p>
+    </section>
+
+    <section class="machine">
+      <div class="stat">
+        <span class="label">Cores</span>
+        <span id="cores" class="value">—</span>
+      </div>
+      <div class="stat">
+        <span class="label">Workers</span>
+        <span id="workers" class="value">—</span>
+      </div>
+      <div class="stat wide">
+        <span class="label">Load</span>
+        <div class="load-track">
+          <div id="load-bar" class="load-bar"></div>
+        </div>
+        <span id="load-text" class="value mono">—</span>
+      </div>
+      <div class="stat">
+        <span class="label">RAM free</span>
+        <span id="ram" class="value mono">—</span>
+      </div>
+      <div class="stat">
+        <span class="label">Last idle</span>
+        <span id="idle" class="value mono">—</span>
+      </div>
+    </section>
+
+    <section class="current">
+      <h2>Current work</h2>
+      <div id="current-empty" class="empty">No active batch — waiting for work.</div>
+      <div id="current-card" class="current-card hidden">
+        <div class="row">
+          <div>
+            <span class="label">Challenge</span>
+            <p id="cur-challenge" class="big">—</p>
+          </div>
+          <div>
+            <span class="label">Phase</span>
+            <p id="cur-phase" class="big">—</p>
+          </div>
+        </div>
+        <div class="row">
+          <div>
+            <span class="label">Algorithm</span>
+            <p id="cur-algo" class="mono">—</p>
+          </div>
+          <div>
+            <span class="label">Track</span>
+            <p id="cur-track" class="mono">—</p>
+          </div>
+        </div>
+        <div class="row">
+          <div>
+            <span class="label">Nonces</span>
+            <p id="cur-nonces" class="big">—</p>
+          </div>
+          <div>
+            <span class="label">Batch</span>
+            <p id="cur-batch" class="mono">—</p>
+          </div>
+        </div>
+        <div class="progress-track">
+          <div id="nonce-bar" class="progress-bar"></div>
+        </div>
+        <p id="cur-elapsed" class="elapsed">—</p>
+      </div>
+    </section>
+
+    <section class="recent">
+      <h2>Recent</h2>
+      <ul id="recent-list" class="recent-list"></ul>
+      <p id="recent-empty" class="empty">No completed batches yet.</p>
+    </section>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>
