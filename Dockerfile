@@ -11,5 +11,6 @@ RUN apt-get update && apt-get install -y docker.io \
 COPY common common
 COPY main.py main.py
 COPY dashboard dashboard
+COPY VERSION VERSION
 
 CMD ["python", "main.py"]

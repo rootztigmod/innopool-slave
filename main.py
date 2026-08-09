@@ -30,7 +30,17 @@ from common.merkle_tree import MerkleTree, MerkleHash
 
 logger = logging.getLogger(os.path.splitext(os.path.basename(__file__))[0])
 
-SLAVE_VERSION = os.getenv("INNOPOOL_SLAVE_VERSION") or "innopool-slave/0.1.5"
+def _default_slave_version() -> str:
+    try:
+        ver = (Path(__file__).resolve().parent / "VERSION").read_text().strip()
+        if ver:
+            return ver if ver.startswith("innopool-slave/") else f"innopool-slave/{ver}"
+    except OSError:
+        pass
+    return "innopool-slave/0.1.6"
+
+
+SLAVE_VERSION = os.getenv("INNOPOOL_SLAVE_VERSION") or _default_slave_version()
 IDLE_POLL_SEC = float(os.getenv("INNOPOOL_IDLE_POLL_SEC", "5.0"))
 BUSY_POLL_SEC = float(os.getenv("INNOPOOL_BUSY_POLL_SEC", "3.0"))
 ERROR_POLL_SEC = float(os.getenv("INNOPOOL_ERROR_POLL_SEC", "5.0"))
