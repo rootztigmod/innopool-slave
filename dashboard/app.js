@@ -36,16 +36,40 @@ function render(data) {
   chip.textContent = STATE_LABELS[state] || state;
   chip.className = `state-chip ${state}`;
 
-  $("cores").textContent = data.cores ?? "—";
+  const gpuModel = data.gpu_model;
+  if (gpuModel) {
+    $("hw-label").textContent = "GPU";
+    $("cores").textContent = gpuModel;
+    $("cores").classList.add("mono");
+  } else {
+    $("hw-label").textContent = "Cores";
+    $("cores").textContent = data.cores ?? "—";
+    $("cores").classList.remove("mono");
+  }
   $("workers").textContent = data.num_workers ?? "—";
 
-  const cores = Math.max(1, Number(data.cores) || 1);
-  const load = Number(data.load_1m);
-  const loadPct = Number.isFinite(load) ? Math.min(100, (load / cores) * 100) : 0;
-  $("load-bar").style.width = `${loadPct}%`;
-  $("load-text").textContent = Number.isFinite(load)
-    ? `${load.toFixed(2)} (${(load / cores).toFixed(2)}/core)`
-    : "—";
+  const gpuUtil = Number(data.gpu_util);
+  if (gpuModel && Number.isFinite(gpuUtil)) {
+    $("load-label").textContent = "GPU util";
+    $("load-bar").style.width = `${Math.min(100, Math.max(0, gpuUtil))}%`;
+    const vramTotal = Number(data.gpu_vram_total_mb);
+    const vramUsed = Number(data.gpu_vram_used_mb);
+    if (Number.isFinite(vramTotal) && Number.isFinite(vramUsed) && vramTotal > 0) {
+      $("load-text").textContent =
+        `${gpuUtil.toFixed(0)}% · VRAM ${Math.round(vramUsed)} / ${Math.round(vramTotal)} MB`;
+    } else {
+      $("load-text").textContent = `${gpuUtil.toFixed(0)}%`;
+    }
+  } else {
+    $("load-label").textContent = "Load";
+    const cores = Math.max(1, Number(data.cores) || 1);
+    const load = Number(data.load_1m);
+    const loadPct = Number.isFinite(load) ? Math.min(100, (load / cores) * 100) : 0;
+    $("load-bar").style.width = `${loadPct}%`;
+    $("load-text").textContent = Number.isFinite(load)
+      ? `${load.toFixed(2)} (${(load / cores).toFixed(2)}/core)`
+      : "—";
+  }
 
   const ramGb = data.ram_gb;
   const freeGb = data.free_ram_gb;

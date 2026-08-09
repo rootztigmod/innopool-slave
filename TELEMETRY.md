@@ -12,7 +12,8 @@ Stock slaves omit all fields; master degrades safely.
 | `load_1m` | float | 1-minute load average |
 | `ram_gb` | int > 0 | Total RAM |
 | `free_ram_gb` | float | Available RAM |
-| `gpu_util` | float | GPU only |
+| `gpu_model` | string | GPU only (e.g. `NVIDIA GeForce RTX 4090`) |
+| `gpu_util` | float | GPU only (0–100) |
 | `gpu_vram_free_mb` | int > 0 | GPU only |
 
 ## v1.5 — runtime (observability / future scheduling)

@@ -30,10 +30,14 @@ from common.merkle_tree import MerkleTree, MerkleHash
 
 logger = logging.getLogger(os.path.splitext(os.path.basename(__file__))[0])
 
-SLAVE_VERSION = os.getenv("INNOPOOL_SLAVE_VERSION") or "innopool-slave/0.1.4"
-IDLE_POLL_SEC = float(os.getenv("INNOPOOL_IDLE_POLL_SEC", "1.0"))
+SLAVE_VERSION = os.getenv("INNOPOOL_SLAVE_VERSION") or "innopool-slave/0.1.5"
+IDLE_POLL_SEC = float(os.getenv("INNOPOOL_IDLE_POLL_SEC", "5.0"))
 BUSY_POLL_SEC = float(os.getenv("INNOPOOL_BUSY_POLL_SEC", "3.0"))
 ERROR_POLL_SEC = float(os.getenv("INNOPOOL_ERROR_POLL_SEC", "5.0"))
+_GPU_TELEM_LOCK = Lock()
+_GPU_TELEM_CACHE = {"ts_ms": 0, "data": {}}
+_GPU_TELEM_TTL_MS = 5000
+_GPU_RUNTIME_CONTAINERS = ("hypergraph", "vector_search", "neuralnet_optimizer")
 
 PENDING_BATCH_IDS = set()
 PROCESSING_BATCH_IDS = {}
@@ -181,6 +185,11 @@ def _status_snapshot(num_workers: int) -> dict:
         "state": display,
         "runtime_state": telem.get("state"),
         "cores": cores,
+        "gpu_model": telem.get("gpu_model"),
+        "gpu_util": telem.get("gpu_util"),
+        "gpu_vram_total_mb": telem.get("gpu_vram_total_mb"),
+        "gpu_vram_used_mb": telem.get("gpu_vram_used_mb"),
+        "gpu_vram_free_mb": telem.get("gpu_vram_free_mb"),
         "num_workers": int(telem.get("num_workers") or num_workers),
         "load_1m": load,
         "load_per_core": (float(load) / cores) if load is not None else None,
@@ -281,6 +290,80 @@ def _wake_poll():
     _POLL_WAKE.set()
 
 
+def _parse_nvidia_smi_csv(text: str) -> dict:
+    """Parse first GPU row from nvidia-smi csv query output."""
+    line = (text or "").strip().splitlines()
+    if not line:
+        return {}
+    parts = [p.strip() for p in line[0].split(",")]
+    if len(parts) < 4:
+        return {}
+    out = {"gpu_model": parts[0]}
+    try:
+        out["gpu_util"] = float(parts[1])
+    except ValueError:
+        pass
+    try:
+        total_mb = int(float(parts[2]))
+        used_mb = int(float(parts[3]))
+        out["gpu_vram_total_mb"] = total_mb
+        out["gpu_vram_used_mb"] = used_mb
+        out["gpu_vram_free_mb"] = max(0, total_mb - used_mb)
+    except ValueError:
+        pass
+    return out
+
+
+def _nvidia_smi_query(cmd: list) -> dict:
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return {}
+    if proc.returncode != 0:
+        return {}
+    return _parse_nvidia_smi_csv(proc.stdout)
+
+
+def _collect_gpu_telemetry() -> dict:
+    """Best-effort GPU stats for dashboard + master telemetry."""
+    now_ms = now()
+    with _GPU_TELEM_LOCK:
+        if now_ms - int(_GPU_TELEM_CACHE.get("ts_ms") or 0) < _GPU_TELEM_TTL_MS:
+            return dict(_GPU_TELEM_CACHE.get("data") or {})
+
+    query = [
+        "--query-gpu=name,utilization.gpu,memory.total,memory.used",
+        "--format=csv,noheader,nounits",
+    ]
+    data = _nvidia_smi_query(["nvidia-smi", *query])
+    if not data:
+        # Slave container usually has no GPU runtime; query via challenge containers.
+        for container in _GPU_RUNTIME_CONTAINERS:
+            data = _nvidia_smi_query(
+                ["docker", "exec", container, "nvidia-smi", *query]
+            )
+            if data:
+                break
+
+    with _GPU_TELEM_LOCK:
+        if data:
+            _GPU_TELEM_CACHE["ts_ms"] = now_ms
+            _GPU_TELEM_CACHE["data"] = data
+        elif _GPU_TELEM_CACHE.get("data"):
+            # Keep last good sample briefly if nvidia-smi blips.
+            return dict(_GPU_TELEM_CACHE["data"])
+        else:
+            _GPU_TELEM_CACHE["ts_ms"] = now_ms
+            _GPU_TELEM_CACHE["data"] = {}
+        return dict(_GPU_TELEM_CACHE.get("data") or {})
+
+
 def _collect_host_telemetry(num_workers: int) -> dict:
     cores = os.cpu_count() or 1
     telem = {
@@ -314,6 +397,9 @@ def _collect_host_telemetry(num_workers: int) -> dict:
         _ = page_size  # quiet linters; kept for future RSS sampling
     except Exception:
         pass
+    slave_name = (_SLAVE_NAME or os.getenv("SLAVE_NAME") or "").lower()
+    if slave_name.startswith("pool-gpu") or "gpu" in slave_name:
+        telem.update(_collect_gpu_telemetry())
     return telem
 
 
@@ -324,6 +410,7 @@ def _telemetry_headers(telem: dict) -> dict:
         "load_1m": "X-InnoPool-Load-1m",
         "ram_gb": "X-InnoPool-Ram-Gb",
         "free_ram_gb": "X-InnoPool-Free-Ram-Gb",
+        "gpu_model": "X-InnoPool-Gpu-Model",
         "gpu_util": "X-InnoPool-Gpu-Util",
         "gpu_vram_free_mb": "X-InnoPool-Gpu-Vram-Free-Mb",
         "state": "X-InnoPool-State",
