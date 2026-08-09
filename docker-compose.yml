@@ -17,7 +17,7 @@ services:
       - NUM_WORKERS=${NUM_WORKERS}
       - DASHBOARD_PORT=8787
       - DASHBOARD_HOST=0.0.0.0
-      - INNOPOOL_SLAVE_VERSION=${INNOPOOL_SLAVE_VERSION:-innopool-slave/0.1.5}
+      - INNOPOOL_SLAVE_VERSION=${INNOPOOL_SLAVE_VERSION:-innopool-slave/0.1.6}
     restart: unless-stopped
 
   # CPU challenge runtimes (pool-cpu-*)

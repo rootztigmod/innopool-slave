@@ -37,14 +37,20 @@ function render(data) {
   chip.className = `state-chip ${state}`;
 
   const gpuModel = data.gpu_model;
+  const machine = $("machine");
+  const ramStat = $("ram-stat");
   if (gpuModel) {
     $("hw-label").textContent = "GPU";
     $("cores").textContent = gpuModel;
     $("cores").classList.add("mono");
+    machine.classList.add("gpu");
+    ramStat.classList.add("hidden");
   } else {
     $("hw-label").textContent = "Cores";
     $("cores").textContent = data.cores ?? "—";
     $("cores").classList.remove("mono");
+    machine.classList.remove("gpu");
+    ramStat.classList.remove("hidden");
   }
   $("workers").textContent = data.num_workers ?? "—";
 
@@ -56,7 +62,7 @@ function render(data) {
     const vramUsed = Number(data.gpu_vram_used_mb);
     if (Number.isFinite(vramTotal) && Number.isFinite(vramUsed) && vramTotal > 0) {
       $("load-text").textContent =
-        `${gpuUtil.toFixed(0)}% · VRAM ${Math.round(vramUsed)} / ${Math.round(vramTotal)} MB`;
+        `${gpuUtil.toFixed(0)}%  ·  ${Math.round(vramUsed)} / ${Math.round(vramTotal)} MB`;
     } else {
       $("load-text").textContent = `${gpuUtil.toFixed(0)}%`;
     }
@@ -71,10 +77,12 @@ function render(data) {
       : "—";
   }
 
-  const ramGb = data.ram_gb;
-  const freeGb = data.free_ram_gb;
-  $("ram").textContent =
-    freeGb != null && ramGb != null ? `${freeGb} / ${ramGb} GB` : "—";
+  if (!gpuModel) {
+    const ramGb = data.ram_gb;
+    const freeGb = data.free_ram_gb;
+    $("ram").textContent =
+      freeGb != null && ramGb != null ? `${freeGb} / ${ramGb} GB` : "—";
+  }
   $("idle").textContent = fmtMs(data.last_idle_ms);
   $("updated").textContent = `Updated ${new Date().toLocaleTimeString()}`;
 

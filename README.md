@@ -74,4 +74,4 @@ If you already run stock `tig-benchmarker`, you can still copy `main.py` + `dash
 
 ## Version
 
-See `VERSION` (currently `0.1.5`). Reported to the master as `innopool-slave/0.1.5` unless overridden.
+See `VERSION` (currently `0.1.6`). Reported to the master as `innopool-slave/0.1.6` unless overridden.
