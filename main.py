@@ -354,7 +354,12 @@ def download_library(algorithms_dir, batch):
             if resp.status_code != 200:
                 raise Exception(f"status {resp.status_code} when downloading algorithm library: {resp.text}")
             with tarfile.open(fileobj=io.BytesIO(resp.content), mode="r:gz") as tar:
-                tar.extractall(path=challenge_folder)
+                # Python 3.12+ / 3.14: pass filter to avoid DeprecationWarning
+                # and upcoming default data-filter behavior.
+                try:
+                    tar.extractall(path=challenge_folder, filter="data")
+                except TypeError:
+                    tar.extractall(path=challenge_folder)
             logger.debug(f"downloading {batch['algorithm']}.tar.gz took {now() - start}ms")
         finally:
             with _STATE_LOCK:
