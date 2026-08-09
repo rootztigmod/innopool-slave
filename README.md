@@ -25,6 +25,19 @@ Dashboard: [http://localhost:8787](http://localhost:8787)
 
 CPU challenges match the typical InnoPool `pool-cpu-*` route (`c001/c002/c003/c007/c008`).
 
+GPU challenges (`vector_search`, `hypergraph`, `neuralnet_optimizer`) are in the same
+compose file. Start only the services you need (Join-page `install.sh` does this for you):
+
+```bash
+# CPU only
+docker compose up -d --build slave satisfiability vehicle_routing knapsack job_scheduling energy_arbitrage
+
+# GPU only (needs NVIDIA Container Toolkit)
+docker compose up -d --build slave vector_search hypergraph neuralnet_optimizer
+```
+
+Prefer the pool Join-page one-liner over manual clone when onboarding members.
+
 ## `.env` checklist
 
 1. **`SLAVE_NAME`** — unique; must be allowed by the pool (e.g. `pool-cpu-<something>`).

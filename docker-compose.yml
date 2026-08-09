@@ -20,6 +20,7 @@ services:
       - INNOPOOL_SLAVE_VERSION=${INNOPOOL_SLAVE_VERSION:-innopool-slave/0.1.4}
     restart: unless-stopped
 
+  # CPU challenge runtimes (pool-cpu-*)
   satisfiability:
     image: ghcr.io/tig-foundation/tig-monorepo/satisfiability/runtime:${TIG_VERSION}
     container_name: satisfiability
@@ -59,6 +60,37 @@ services:
   energy_arbitrage:
     image: ghcr.io/tig-foundation/tig-monorepo/energy_arbitrage/runtime:${TIG_VERSION}
     container_name: energy_arbitrage
+    volumes:
+      - ${ALGORITHMS_DIR}:/app/algorithms
+      - ${RESULTS_DIR}:/app/results
+    command: ["sleep", "infinity"]
+    restart: unless-stopped
+
+  # GPU challenge runtimes (pool-gpu-*) — require NVIDIA Container Toolkit
+  vector_search:
+    image: ghcr.io/tig-foundation/tig-monorepo/vector_search/runtime:${TIG_VERSION}
+    container_name: vector_search
+    runtime: nvidia
+    volumes:
+      - ${ALGORITHMS_DIR}:/app/algorithms
+      - ${RESULTS_DIR}:/app/results
+    command: ["sleep", "infinity"]
+    restart: unless-stopped
+
+  hypergraph:
+    image: ghcr.io/tig-foundation/tig-monorepo/hypergraph/runtime:${TIG_VERSION}
+    container_name: hypergraph
+    runtime: nvidia
+    volumes:
+      - ${ALGORITHMS_DIR}:/app/algorithms
+      - ${RESULTS_DIR}:/app/results
+    command: ["sleep", "infinity"]
+    restart: unless-stopped
+
+  neuralnet_optimizer:
+    image: ghcr.io/tig-foundation/tig-monorepo/neuralnet_optimizer/runtime:${TIG_VERSION}
+    container_name: neuralnet_optimizer
+    runtime: nvidia
     volumes:
       - ${ALGORITHMS_DIR}:/app/algorithms
       - ${RESULTS_DIR}:/app/results
