@@ -844,12 +844,18 @@ def process_batch(algorithms_dir, results_dir):
 
     containers = set(subprocess.check_output(["docker", "ps", "--format", "{{.Names}}"], text=True).splitlines())
     if batch["challenge"] not in containers:
-        logger.error(
-            f"Error processing batch {batch_id}: Challenge container {batch['challenge']} not found. "
+        msg = (
+            f"Challenge container {batch['challenge']} not found. "
             f"Did you start it with 'docker-compose up {batch['challenge']}'?"
         )
-        PENDING_BATCH_IDS.add(batch_id)
-        time.sleep(2)
+        logger.error(f"Error processing batch {batch_id}: {msg}")
+        # Report to master so assignment is released / slave quarantined.
+        # Do not silent-requeue: that heartbeats while warehousing the root forever.
+        with open(f"{results_dir}/{batch_id}/result.json", "w") as f:
+            json.dump({"error": msg}, f)
+        READY_BATCH_IDS.add(batch_id)
+        _status_push_recent(batch, "error", error=msg)
+        _wake_poll()
         return
 
     q = Queue()

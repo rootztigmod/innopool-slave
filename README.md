@@ -74,4 +74,7 @@ If you already run stock `tig-benchmarker`, you can still copy `main.py` + `dash
 
 ## Version
 
-See `VERSION` (currently `0.1.9`). Reported to the master as `innopool-slave/<VERSION>` from the packaged file — no `.env` override.
+See `VERSION` (currently `0.1.10`). Reported to the master as `innopool-slave/<VERSION>` from the packaged file — no `.env` override.
+
+Missing challenge containers are reported to the master as infrastructure errors (so the
+assignment is released) instead of silently re-queuing while the slave keeps heartbeating.
