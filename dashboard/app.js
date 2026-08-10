@@ -106,9 +106,18 @@ function render(data) {
     $("cur-track").textContent = cur.track_id || "—";
     const done = cur.nonces_done ?? 0;
     const total = cur.nonces_total ?? 0;
-    $("cur-nonces").textContent = total ? `${done} / ${total}` : "—";
+    const running = Math.max(0, Number(cur.nonces_running) || 0);
+    if (!total) {
+      $("cur-nonces").textContent = "—";
+    } else if (running > 0) {
+      $("cur-nonces").textContent = `${done} / ${total} · ${running} running`;
+    } else {
+      $("cur-nonces").textContent = `${done} / ${total}`;
+    }
     $("cur-batch").textContent = shortId(cur.batch_id);
-    const pct = total ? Math.min(100, (done / total) * 100) : 0;
+    const pct = total
+      ? Math.min(100, ((done + running * 0.35) / total) * 100)
+      : 0;
     $("nonce-bar").style.width = `${pct}%`;
     $("cur-elapsed").textContent = `Elapsed ${fmtMs(cur.elapsed_ms)}`;
   }
@@ -155,12 +164,20 @@ function render(data) {
 }
 
 async function tick() {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 2500);
   try {
-    const resp = await fetch("/api/status", { cache: "no-store" });
+    const resp = await fetch("/api/status", {
+      cache: "no-store",
+      signal: ctrl.signal,
+    });
     if (!resp.ok) throw new Error(`status ${resp.status}`);
     render(await resp.json());
   } catch (err) {
-    $("updated").textContent = `Update failed: ${err.message}`;
+    const msg = err.name === "AbortError" ? "timeout" : err.message;
+    $("updated").textContent = `Update failed: ${msg}`;
+  } finally {
+    clearTimeout(timer);
   }
 }
 

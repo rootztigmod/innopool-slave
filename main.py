@@ -37,7 +37,7 @@ def _default_slave_version() -> str:
             return ver if ver.startswith("innopool-slave/") else f"innopool-slave/{ver}"
     except OSError:
         pass
-    return "innopool-slave/0.1.6"
+    return "innopool-slave/0.1.7"
 
 
 SLAVE_VERSION = os.getenv("INNOPOOL_SLAVE_VERSION") or _default_slave_version()
@@ -47,6 +47,7 @@ ERROR_POLL_SEC = float(os.getenv("INNOPOOL_ERROR_POLL_SEC", "5.0"))
 _GPU_TELEM_LOCK = Lock()
 _GPU_TELEM_CACHE = {"ts_ms": 0, "data": {}}
 _GPU_TELEM_TTL_MS = 5000
+_GPU_TELEM_REFRESHING = False
 _GPU_RUNTIME_CONTAINERS = ("hypergraph", "vector_search", "neuralnet_optimizer")
 
 PENDING_BATCH_IDS = set()
@@ -113,17 +114,25 @@ def _status_set_current(batch: dict, nonces_done: int = 0, started_ms=None):
         _CURRENT = {
             **meta,
             "nonces_done": int(nonces_done),
+            "nonces_running": 0,
             "started_ms": start,
         }
 
 
-def _status_update_progress(batch_id: str, nonces_done: int, nonces_total=None):
+def _status_update_progress(
+    batch_id: str,
+    nonces_done: int,
+    nonces_total=None,
+    nonces_running=None,
+):
     with _STATUS_LOCK:
         if not _CURRENT or _CURRENT.get("batch_id") != batch_id:
             return
         _CURRENT["nonces_done"] = int(nonces_done)
         if nonces_total is not None:
             _CURRENT["nonces_total"] = int(nonces_total)
+        if nonces_running is not None:
+            _CURRENT["nonces_running"] = max(0, int(nonces_running))
 
 
 def _status_clear_current(batch_id=None):
@@ -179,7 +188,8 @@ def _display_state(current) -> str:
 
 
 def _status_snapshot(num_workers: int) -> dict:
-    telem = _collect_host_telemetry(num_workers)
+    # Cache-only GPU stats — never stall the HTTP handler on nvidia-smi.
+    telem = _collect_host_telemetry(num_workers, query_gpu=False)
     cores = int(telem.get("cores") or 1)
     load = telem.get("load_1m")
     with _STATUS_LOCK:
@@ -340,41 +350,71 @@ def _nvidia_smi_query(cmd: list) -> dict:
     return _parse_nvidia_smi_csv(proc.stdout)
 
 
-def _collect_gpu_telemetry() -> dict:
-    """Best-effort GPU stats for dashboard + master telemetry."""
+def _is_gpu_slave() -> bool:
+    slave_name = (_SLAVE_NAME or os.getenv("SLAVE_NAME") or "").lower()
+    return slave_name.startswith("pool-gpu") or "gpu" in slave_name
+
+
+def _gpu_telem_cached() -> dict:
+    with _GPU_TELEM_LOCK:
+        return dict(_GPU_TELEM_CACHE.get("data") or {})
+
+
+def _collect_gpu_telemetry(*, force: bool = False) -> dict:
+    """Best-effort GPU stats for dashboard + master telemetry.
+
+    Avoid overlapping nvidia-smi / docker-exec queries — those can stall the
+    dashboard /api/status handler and show "Failed to fetch".
+    """
+    global _GPU_TELEM_REFRESHING
     now_ms = now()
     with _GPU_TELEM_LOCK:
-        if now_ms - int(_GPU_TELEM_CACHE.get("ts_ms") or 0) < _GPU_TELEM_TTL_MS:
+        age = now_ms - int(_GPU_TELEM_CACHE.get("ts_ms") or 0)
+        if not force and age < _GPU_TELEM_TTL_MS:
             return dict(_GPU_TELEM_CACHE.get("data") or {})
+        if _GPU_TELEM_REFRESHING:
+            return dict(_GPU_TELEM_CACHE.get("data") or {})
+        _GPU_TELEM_REFRESHING = True
 
     query = [
         "--query-gpu=name,utilization.gpu,memory.total,memory.used",
         "--format=csv,noheader,nounits",
     ]
-    data = _nvidia_smi_query(["nvidia-smi", *query])
-    if not data:
-        # Slave container usually has no GPU runtime; query via challenge containers.
-        for container in _GPU_RUNTIME_CONTAINERS:
-            data = _nvidia_smi_query(
-                ["docker", "exec", container, "nvidia-smi", *query]
-            )
+    data = {}
+    try:
+        data = _nvidia_smi_query(["nvidia-smi", *query])
+        if not data:
+            # Slave container usually has no GPU runtime; query via challenge containers.
+            for container in _GPU_RUNTIME_CONTAINERS:
+                data = _nvidia_smi_query(
+                    ["docker", "exec", container, "nvidia-smi", *query]
+                )
+                if data:
+                    break
+    finally:
+        with _GPU_TELEM_LOCK:
+            _GPU_TELEM_REFRESHING = False
             if data:
-                break
-
-    with _GPU_TELEM_LOCK:
-        if data:
-            _GPU_TELEM_CACHE["ts_ms"] = now_ms
-            _GPU_TELEM_CACHE["data"] = data
-        elif _GPU_TELEM_CACHE.get("data"):
-            # Keep last good sample briefly if nvidia-smi blips.
-            return dict(_GPU_TELEM_CACHE["data"])
-        else:
-            _GPU_TELEM_CACHE["ts_ms"] = now_ms
-            _GPU_TELEM_CACHE["data"] = {}
-        return dict(_GPU_TELEM_CACHE.get("data") or {})
+                _GPU_TELEM_CACHE["ts_ms"] = now_ms
+                _GPU_TELEM_CACHE["data"] = data
+            elif not _GPU_TELEM_CACHE.get("data"):
+                _GPU_TELEM_CACHE["ts_ms"] = now_ms
+                _GPU_TELEM_CACHE["data"] = {}
+            out = dict(_GPU_TELEM_CACHE.get("data") or {})
+    return out
 
 
-def _collect_host_telemetry(num_workers: int) -> dict:
+def _gpu_telem_loop():
+    while True:
+        try:
+            if _is_gpu_slave():
+                _collect_gpu_telemetry(force=True)
+        except Exception as exc:
+            logger.debug("gpu telemetry refresh failed: %s", exc)
+        time.sleep(2.0)
+
+
+def _collect_host_telemetry(num_workers: int, *, query_gpu: bool = True) -> dict:
     cores = os.cpu_count() or 1
     telem = {
         "cores": cores,
@@ -407,9 +447,9 @@ def _collect_host_telemetry(num_workers: int) -> dict:
         _ = page_size  # quiet linters; kept for future RSS sampling
     except Exception:
         pass
-    slave_name = (_SLAVE_NAME or os.getenv("SLAVE_NAME") or "").lower()
-    if slave_name.startswith("pool-gpu") or "gpu" in slave_name:
-        telem.update(_collect_gpu_telemetry())
+    if _is_gpu_slave():
+        # Dashboard must never block on nvidia-smi/docker exec.
+        telem.update(_collect_gpu_telemetry() if query_gpu else _gpu_telem_cached())
     return telem
 
 
@@ -783,10 +823,24 @@ def process_nonces(results_dir):
         return
 
     logger.debug(f"batch {batch_id}, nonce {nonce} started")
+    # Nonces already taken from the queue but not finished yet (this worker + peers).
+    in_flight = batch["num_nonces"] - len(job["finished"]) - q.qsize()
+    _status_update_progress(
+        batch_id,
+        len(job["finished"]),
+        batch.get("num_nonces"),
+        nonces_running=max(1, in_flight),
+    )
     try:
         run_tig_runtime(nonce, batch, so_path, ptx_path, results_dir)
         job["finished"].add(nonce)
-        _status_update_progress(batch_id, len(job["finished"]), batch.get("num_nonces"))
+        in_flight = batch["num_nonces"] - len(job["finished"]) - q.qsize()
+        _status_update_progress(
+            batch_id,
+            len(job["finished"]),
+            batch.get("num_nonces"),
+            nonces_running=max(0, in_flight),
+        )
     except Exception as e:
         msg = f"batch {batch_id}, nonce {nonce}, runtime error: {e}"
         logger.error(msg)
@@ -975,6 +1029,8 @@ def main():
 
     os.makedirs(algorithms_dir, exist_ok=True)
     _start_dashboard_server(num_workers)
+    if _is_gpu_slave():
+        Thread(target=_gpu_telem_loop, name="gpu-telem", daemon=True).start()
 
     headers = {"User-Agent": slave_name}
 
