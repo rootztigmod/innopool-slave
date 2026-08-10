@@ -37,7 +37,7 @@ def _default_slave_version() -> str:
             return ver if ver.startswith("innopool-slave/") else f"innopool-slave/{ver}"
     except OSError:
         pass
-    return "innopool-slave/0.1.7"
+    return "innopool-slave/0.1.8"
 
 
 SLAVE_VERSION = os.getenv("INNOPOOL_SLAVE_VERSION") or _default_slave_version()
@@ -124,15 +124,68 @@ def _status_update_progress(
     nonces_done: int,
     nonces_total=None,
     nonces_running=None,
+    batch=None,
 ):
+    """Update Current work. Follow the batch that is actively computing.
+
+    With multiple PROCESSING batches, Current can be a different id than the
+    nonce just started/finished — retarget so the dashboard does not stick at 0/N.
+    """
+    global _CURRENT
     with _STATUS_LOCK:
         if not _CURRENT or _CURRENT.get("batch_id") != batch_id:
+            if batch is None:
+                return
+            meta = _batch_meta(batch)
+            job = PROCESSING_BATCH_IDS.get(batch_id) or {}
+            _CURRENT = {
+                **meta,
+                "nonces_done": int(nonces_done),
+                "nonces_running": max(0, int(nonces_running or 0)),
+                "started_ms": int(job.get("start") or now()),
+            }
             return
         _CURRENT["nonces_done"] = int(nonces_done)
         if nonces_total is not None:
             _CURRENT["nonces_total"] = int(nonces_total)
         if nonces_running is not None:
             _CURRENT["nonces_running"] = max(0, int(nonces_running))
+
+
+def _status_current_from_jobs():
+    """Build Current card from live PROCESSING jobs (source of truth)."""
+    best = None
+    for batch_id, job in list(PROCESSING_BATCH_IDS.items()):
+        batch = job.get("batch") or {}
+        finished = len(job.get("finished") or ())
+        try:
+            queued = job["q"].qsize()
+        except Exception:
+            queued = 0
+        total = int(batch.get("num_nonces") or 0)
+        running = max(0, total - finished - queued) if total else 0
+        candidate = {
+            **_batch_meta(batch),
+            "nonces_done": finished,
+            "nonces_running": running,
+            "started_ms": int(job.get("start") or now()),
+            "_rank_running": running,
+            "_rank_start": int(job.get("start") or 0),
+        }
+        if best is None:
+            best = candidate
+            continue
+        # Prefer the batch that currently has in-flight nonces; else newest.
+        if candidate["_rank_running"] > best["_rank_running"] or (
+            candidate["_rank_running"] == best["_rank_running"]
+            and candidate["_rank_start"] >= best["_rank_start"]
+        ):
+            best = candidate
+    if not best:
+        return None
+    best.pop("_rank_running", None)
+    best.pop("_rank_start", None)
+    return best
 
 
 def _status_clear_current(batch_id=None):
@@ -192,8 +245,9 @@ def _status_snapshot(num_workers: int) -> dict:
     telem = _collect_host_telemetry(num_workers, query_gpu=False)
     cores = int(telem.get("cores") or 1)
     load = telem.get("load_1m")
+    from_jobs = _status_current_from_jobs()
     with _STATUS_LOCK:
-        current = dict(_CURRENT) if _CURRENT else None
+        current = from_jobs or (dict(_CURRENT) if _CURRENT else None)
         recent = list(_RECENT)
     if current and current.get("started_ms"):
         current["elapsed_ms"] = max(0, now() - int(current["started_ms"]))
@@ -771,6 +825,13 @@ def process_batch(algorithms_dir, results_dir):
     if batch_id in PROCESSING_BATCH_IDS or batch_id in READY_BATCH_IDS:
         return
 
+    # One GPU — do not interleave hypergraph / vector_search / neuralnet batches.
+    # That also broke the dashboard (Current = batch A, progress updates for B).
+    if _is_gpu_slave() and PROCESSING_BATCH_IDS:
+        PENDING_BATCH_IDS.add(batch_id)
+        time.sleep(0.5)
+        return
+
     if os.path.exists(f"{results_dir}/{batch_id}/result.json"):
         logger.info(f"batch {batch_id} already processed")
         READY_BATCH_IDS.add(batch_id)
@@ -786,6 +847,8 @@ def process_batch(algorithms_dir, results_dir):
             f"Error processing batch {batch_id}: Challenge container {batch['challenge']} not found. "
             f"Did you start it with 'docker-compose up {batch['challenge']}'?"
         )
+        PENDING_BATCH_IDS.add(batch_id)
+        time.sleep(2)
         return
 
     q = Queue()
@@ -830,6 +893,7 @@ def process_nonces(results_dir):
         len(job["finished"]),
         batch.get("num_nonces"),
         nonces_running=max(1, in_flight),
+        batch=batch,
     )
     try:
         run_tig_runtime(nonce, batch, so_path, ptx_path, results_dir)
@@ -840,6 +904,7 @@ def process_nonces(results_dir):
             len(job["finished"]),
             batch.get("num_nonces"),
             nonces_running=max(0, in_flight),
+            batch=batch,
         )
     except Exception as e:
         msg = f"batch {batch_id}, nonce {nonce}, runtime error: {e}"
