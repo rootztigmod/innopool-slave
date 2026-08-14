@@ -45,11 +45,21 @@ SLAVE_VERSION = _package_slave_version()
 IDLE_POLL_SEC = float(os.getenv("INNOPOOL_IDLE_POLL_SEC", "5.0"))
 BUSY_POLL_SEC = float(os.getenv("INNOPOOL_BUSY_POLL_SEC", "3.0"))
 ERROR_POLL_SEC = float(os.getenv("INNOPOOL_ERROR_POLL_SEC", "5.0"))
+# One empty get-batches used to drop PROCESSING and orphan tig-runtime inside
+# the challenge container. Require this many empty polls before abandoning.
+STOP_EMPTY_POLLS = max(1, int(os.getenv("INNOPOOL_STOP_EMPTY_POLLS", "2")))
 _GPU_TELEM_LOCK = Lock()
 _GPU_TELEM_CACHE = {"ts_ms": 0, "data": {}}
 _GPU_TELEM_TTL_MS = 5000
 _GPU_TELEM_REFRESHING = False
 _GPU_RUNTIME_CONTAINERS = ("hypergraph", "vector_search", "neuralnet_optimizer")
+_CPU_CHALLENGES = (
+    "satisfiability",
+    "vehicle_routing",
+    "knapsack",
+    "job_scheduling",
+    "energy_arbitrage",
+)
 
 PENDING_BATCH_IDS = set()
 PROCESSING_BATCH_IDS = {}
@@ -64,6 +74,11 @@ _DOWNLOADING = 0
 _LAST_IDLE_GAP_MS = 0
 _IDLE_SINCE_MS = None
 _POLL_WAKE = Event()
+_RUNTIME_LOCK = Lock()
+_RUNTIME_PROCS = {}  # batch_id -> [Popen, ...]
+_STOPPED_BATCH_IDS = {}  # batch_id -> stopped_ms
+_DRAINING = {}  # challenge -> drain_started_ms
+_EMPTY_REVOKE_STREAK = 0
 
 DASHBOARD_HOST = os.getenv("DASHBOARD_HOST", "0.0.0.0")
 DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "8787"))
@@ -222,9 +237,10 @@ def _display_state(current) -> str:
         processing = bool(PROCESSING_BATCH_IDS)
         pending = bool(PENDING_BATCH_IDS)
         ready = bool(READY_BATCH_IDS)
+        draining = bool(_DRAINING)
     if downloading:
         return "downloading"
-    if processing:
+    if processing or draining:
         return "running"
     if current:
         done = int(current.get("nonces_done") or 0)
@@ -336,7 +352,13 @@ def _mark_busy():
 def _mark_idle_if_quiet():
     global _IDLE_SINCE_MS
     with _STATE_LOCK:
-        busy = bool(PENDING_BATCH_IDS or PROCESSING_BATCH_IDS or READY_BATCH_IDS or _DOWNLOADING)
+        busy = bool(
+            PENDING_BATCH_IDS
+            or PROCESSING_BATCH_IDS
+            or READY_BATCH_IDS
+            or _DOWNLOADING
+            or _DRAINING
+        )
         if busy:
             return
         if _IDLE_SINCE_MS is None:
@@ -349,7 +371,7 @@ def _runtime_state() -> str:
             return "downloading"
         if READY_BATCH_IDS:
             return "submitting"
-        if PROCESSING_BATCH_IDS or PENDING_BATCH_IDS:
+        if PROCESSING_BATCH_IDS or PENDING_BATCH_IDS or _DRAINING:
             return "running"
         return "idle"
 
@@ -476,7 +498,7 @@ def _collect_host_telemetry(num_workers: int, *, query_gpu: bool = True) -> dict
         "num_workers": max(1, int(num_workers)),
         "slave_version": SLAVE_VERSION,
         "state": _runtime_state(),
-        "active_batches": len(PROCESSING_BATCH_IDS),
+        "active_batches": len(PROCESSING_BATCH_IDS) + len(_DRAINING),
         "pending_batches": len(PENDING_BATCH_IDS),
         "last_idle_ms": _last_idle_ms(),
     }
@@ -531,6 +553,245 @@ def _telemetry_headers(telem: dict) -> dict:
     return headers
 
 
+def _managed_challenges():
+    """Challenge containers this slave is allowed to reap.
+
+    CPU and GPU slaves can share a host (and docker.sock). Never pkill the
+    other profile's leftover runtimes.
+    """
+    return _GPU_RUNTIME_CONTAINERS if _is_gpu_slave() else _CPU_CHALLENGES
+
+
+def _cmdline_is_runtime(cmd: str, rand_hash=None) -> bool:
+    if "tig-runtime" not in cmd and "tig-verifier" not in cmd:
+        return False
+    if rand_hash and rand_hash not in cmd:
+        return False
+    return True
+
+
+def _is_stopped_batch(batch_id) -> bool:
+    with _RUNTIME_LOCK:
+        return batch_id in _STOPPED_BATCH_IDS
+
+
+def _prune_stopped_batches(max_age_ms=600000):
+    cutoff = now() - max_age_ms
+    with _RUNTIME_LOCK:
+        stale = [bid for bid, ts in _STOPPED_BATCH_IDS.items() if ts < cutoff]
+        for bid in stale:
+            _STOPPED_BATCH_IDS.pop(bid, None)
+
+
+def _mark_draining(challenge):
+    if not challenge:
+        return
+    with _RUNTIME_LOCK:
+        _DRAINING.setdefault(challenge, now())
+
+
+def _register_runtime_proc(batch_id, process):
+    with _RUNTIME_LOCK:
+        _RUNTIME_PROCS.setdefault(batch_id, []).append(process)
+
+
+def _forget_runtime_proc(batch_id, process):
+    with _RUNTIME_LOCK:
+        procs = _RUNTIME_PROCS.get(batch_id)
+        if not procs:
+            return
+        try:
+            procs.remove(process)
+        except ValueError:
+            pass
+        if not procs:
+            _RUNTIME_PROCS.pop(batch_id, None)
+
+
+def _kill_popen(process):
+    if process is None:
+        return
+    if process.poll() is None:
+        try:
+            process.kill()
+        except OSError:
+            pass
+    for pipe in (process.stdout, process.stderr):
+        if pipe is None:
+            continue
+        try:
+            pipe.close()
+        except Exception:
+            pass
+
+
+def _docker_exec_sh(challenge, script, env=None, timeout=5):
+    cmd = ["docker", "exec"]
+    for key, value in (env or {}).items():
+        cmd.extend(["-e", f"{key}={value}"])
+    cmd.extend([challenge, "sh", "-c", script])
+    return subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+
+
+_CONTAINER_RUNTIME_SCRIPT = r"""
+sig="${KILL_SIG:-}"
+hash="${KILL_HASH:-}"
+for d in /proc/[0-9]*; do
+  pid=${d#/proc/}
+  [ -r "$d/cmdline" ] || continue
+  cmd=$(tr '\0' ' ' < "$d/cmdline" 2>/dev/null) || continue
+  case "$cmd" in
+    *tig-runtime*|*tig-verifier*) ;;
+    *) continue ;;
+  esac
+  if [ -n "$hash" ]; then
+    case "$cmd" in *"$hash"*) ;; *) continue ;; esac
+  fi
+  if [ -n "$sig" ]; then
+    kill -s "$sig" "$pid" 2>/dev/null || true
+  fi
+  echo "$pid"
+done
+"""
+
+
+def _signal_container_runtimes(challenge, sig=None, rand_hash=None) -> list:
+    """TERM/KILL tig-runtime and tig-verifier inside a challenge container.
+
+    Killing the host-side `docker exec` client leaves the container process
+    running. Walk /proc so we do not depend on pkill being installed.
+    """
+    if not challenge:
+        return []
+    env = {
+        "KILL_SIG": sig or "",
+        "KILL_HASH": rand_hash or "",
+    }
+    try:
+        proc = _docker_exec_sh(challenge, _CONTAINER_RUNTIME_SCRIPT, env=env)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+        logger.debug("container runtime signal %s failed: %s", challenge, exc)
+        return []
+    pids = [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]
+    if pids and sig:
+        logger.info(
+            "signaled %s in %s (%s pid%s)%s",
+            sig,
+            challenge,
+            len(pids),
+            "s" if len(pids) != 1 else "",
+            f" hash={rand_hash[:12]}" if rand_hash else "",
+        )
+    return pids
+
+
+def _challenge_has_runtimes(challenge, rand_hash=None) -> bool:
+    return bool(_signal_container_runtimes(challenge, sig=None, rand_hash=rand_hash))
+
+
+def _reap_draining() -> bool:
+    """Finish leftover container runtimes; return True if any are still alive."""
+    with _RUNTIME_LOCK:
+        items = list(_DRAINING.items())
+    still = {}
+    for challenge, started in items:
+        age = now() - started
+        sig = "KILL" if age >= 400 else "TERM"
+        _signal_container_runtimes(challenge, sig)
+        if _challenge_has_runtimes(challenge):
+            still[challenge] = started
+            if age >= 30000:
+                logger.warning(
+                    "leftover tig-runtime still in %s after %sms",
+                    challenge,
+                    age,
+                )
+        else:
+            logger.info("drained leftover runtimes in %s", challenge)
+    with _RUNTIME_LOCK:
+        for challenge, _started in items:
+            if challenge not in still:
+                _DRAINING.pop(challenge, None)
+        _DRAINING.update(still)
+    return bool(still)
+
+
+def _reap_orphan_runtimes(reason="startup"):
+    """Kill leftover tig-runtime from a previous slave process in our containers."""
+    for challenge in _managed_challenges():
+        if not _challenge_has_runtimes(challenge):
+            continue
+        logger.warning("reaping leftover tig-runtime in %s (%s)", challenge, reason)
+        _signal_container_runtimes(challenge, "TERM")
+        _mark_draining(challenge)
+
+
+def _stop_batch(batch_id, reason):
+    """Drop a batch and kill its container-side runtimes. Do not report idle yet."""
+    job = PROCESSING_BATCH_IDS.pop(batch_id, None)
+    batch = (job or {}).get("batch") or {}
+    challenge = batch.get("challenge")
+    rand_hash = batch.get("rand_hash")
+    logger.info("stopping batch %s (%s)", batch_id, reason)
+    with _RUNTIME_LOCK:
+        _STOPPED_BATCH_IDS[batch_id] = now()
+        procs = list(_RUNTIME_PROCS.pop(batch_id, []))
+    for process in procs:
+        _kill_popen(process)
+    if challenge:
+        still_needed = any(
+            ((other.get("batch") or {}).get("challenge") == challenge)
+            for other in PROCESSING_BATCH_IDS.values()
+        )
+        if still_needed:
+            _signal_container_runtimes(challenge, "TERM", rand_hash)
+            _signal_container_runtimes(challenge, "KILL", rand_hash)
+        else:
+            _signal_container_runtimes(challenge, "TERM")
+            _mark_draining(challenge)
+    if batch.get("id"):
+        _status_push_recent(batch, "stopped")
+
+
+def _apply_master_assignment(live_ids, *, stale_only=False):
+    """Revoke local PROCESSING the master no longer owns."""
+    global _EMPTY_REVOKE_STREAK
+    live_ids = set(live_ids or ())
+    if live_ids:
+        _EMPTY_REVOKE_STREAK = 0
+        for batch_id in set(PROCESSING_BATCH_IDS) - live_ids:
+            _stop_batch(batch_id, "master omitted")
+        return
+    if stale_only and PROCESSING_BATCH_IDS:
+        _EMPTY_REVOKE_STREAK = 0
+        logger.warning(
+            "master returned only already-submitted batches; keeping in-flight %s",
+            sorted(PROCESSING_BATCH_IDS),
+        )
+        return
+    if not PROCESSING_BATCH_IDS:
+        _EMPTY_REVOKE_STREAK = 0
+        return
+    _EMPTY_REVOKE_STREAK += 1
+    if _EMPTY_REVOKE_STREAK >= STOP_EMPTY_POLLS:
+        for batch_id in list(PROCESSING_BATCH_IDS):
+            _stop_batch(batch_id, "master empty")
+        _EMPTY_REVOKE_STREAK = 0
+        return
+    logger.warning(
+        "master returned no batches (%s/%s); keeping in-flight %s",
+        _EMPTY_REVOKE_STREAK,
+        STOP_EMPTY_POLLS,
+        sorted(PROCESSING_BATCH_IDS),
+    )
+
+
 def download_library(algorithms_dir, batch):
     global _DOWNLOADING
     challenge_folder = f"{algorithms_dir}/{batch['challenge']}"
@@ -583,54 +844,66 @@ def run_tig_runtime(nonce, batch, so_path, ptx_path, results_dir):
     if ptx_path is not None:
         cmd += ["--ptx", ptx_path]
     logger.debug("computing nonce: %s", " ".join(cmd[:4] + [f"'{cmd[4]}'"] + cmd[5:]))
+    if batch["id"] not in PROCESSING_BATCH_IDS or _is_stopped_batch(batch["id"]):
+        logger.debug("skip nonce %s; batch %s already stopped", nonce, batch["id"])
+        return
     process = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
     )
-    while True:
-        try:
-            _, stderr = process.communicate(timeout=0.1)
-            ret = process.returncode
-            if not os.path.exists(output_file):
-                if ret == 0:
-                    raise Exception("no output")
-                raise Exception(f"failed with exit code {ret}: {stderr}")
-
-            start = now()
-            cmd = [
-                "docker", "exec", batch["challenge"], "tig-verifier",
-                settings,
-                batch["rand_hash"],
-                str(nonce),
-                output_file,
-            ]
-            if ptx_path is not None:
-                cmd += ["--ptx", ptx_path]
-            logger.debug("verifying nonce: %s", " ".join(cmd[:4] + [f"'{cmd[4]}'"] + cmd[5:]))
-            ret = subprocess.run(cmd, capture_output=True, text=True)
-            if ret.returncode != 0:
-                raise Exception(
-                    f"invalid solution (exit code: {ret.returncode}, stderr: {ret.stderr.strip()})"
-                )
-
-            last_line = ret.stdout.strip().splitlines()[-1]
-            if not last_line.startswith("quality: "):
-                raise Exception("failed to find quality in tig-verifier output")
+    _register_runtime_proc(batch["id"], process)
+    try:
+        while True:
             try:
-                quality = int(last_line[len("quality: "):])
-            except Exception:
-                raise Exception("failed to parse quality from tig-verifier output")
-            logger.debug(f"batch {batch['id']}, nonce {nonce} valid solution with quality {quality}")
-            with open(output_file, "r") as f:
-                d = json.load(f)
-                d["quality"] = quality
-            with open(output_file, "w") as f:
-                json.dump(d, f)
-            break
-        except subprocess.TimeoutExpired:
-            if batch["id"] not in PROCESSING_BATCH_IDS:
-                process.kill()
-                logger.debug(f"batch {batch['id']}, nonce {nonce} stopped")
+                _, stderr = process.communicate(timeout=0.1)
+                ret = process.returncode
+                if not os.path.exists(output_file):
+                    if ret == 0:
+                        raise Exception("no output")
+                    raise Exception(f"failed with exit code {ret}: {stderr}")
+
+                start = now()
+                cmd = [
+                    "docker", "exec", batch["challenge"], "tig-verifier",
+                    settings,
+                    batch["rand_hash"],
+                    str(nonce),
+                    output_file,
+                ]
+                if ptx_path is not None:
+                    cmd += ["--ptx", ptx_path]
+                logger.debug("verifying nonce: %s", " ".join(cmd[:4] + [f"'{cmd[4]}'"] + cmd[5:]))
+                ret = subprocess.run(cmd, capture_output=True, text=True)
+                if ret.returncode != 0:
+                    raise Exception(
+                        f"invalid solution (exit code: {ret.returncode}, stderr: {ret.stderr.strip()})"
+                    )
+
+                last_line = ret.stdout.strip().splitlines()[-1]
+                if not last_line.startswith("quality: "):
+                    raise Exception("failed to find quality in tig-verifier output")
+                try:
+                    quality = int(last_line[len("quality: "):])
+                except Exception:
+                    raise Exception("failed to parse quality from tig-verifier output")
+                logger.debug(f"batch {batch['id']}, nonce {nonce} valid solution with quality {quality}")
+                with open(output_file, "r") as f:
+                    d = json.load(f)
+                    d["quality"] = quality
+                with open(output_file, "w") as f:
+                    json.dump(d, f)
                 break
+            except subprocess.TimeoutExpired:
+                if batch["id"] not in PROCESSING_BATCH_IDS or _is_stopped_batch(batch["id"]):
+                    _kill_popen(process)
+                    _signal_container_runtimes(
+                        batch.get("challenge"),
+                        "TERM",
+                        batch.get("rand_hash"),
+                    )
+                    logger.info("stopped container runtime batch %s nonce %s", batch["id"], nonce)
+                    break
+    finally:
+        _forget_runtime_proc(batch["id"], process)
 
     logger.debug(f"batch {batch['id']}, nonce {nonce} finished, took {now() - start}ms")
 
@@ -925,6 +1198,8 @@ def process_nonces(results_dir):
 
 
 def poll_batches(headers, master_ip, master_port, results_dir, num_workers):
+    _reap_draining()
+    _prune_stopped_batches()
     get_batches_url = f"http://{master_ip}:{master_port}/get-batches"
     telem = _collect_host_telemetry(num_workers)
     req_headers = dict(headers)
@@ -1033,22 +1308,14 @@ def poll_batches(headers, master_ip, master_port, results_dir, num_workers):
             _mark_busy()
         # If master only returned already-submitted ghosts, do NOT revoke real
         # in-flight work (that was killing live batches mid-nonce).
-        if root_batch_ids or proofs_batch_ids:
-            for batch_id in set(PROCESSING_BATCH_IDS) - set(root_batch_ids + proofs_batch_ids):
-                logger.info(f"stopping batch {batch_id}")
-                PROCESSING_BATCH_IDS.pop(batch_id, None)
-        elif stale and PROCESSING_BATCH_IDS:
-            logger.warning(
-                "master returned only already-submitted batches %s; keeping in-flight %s",
-                stale,
-                sorted(PROCESSING_BATCH_IDS),
-            )
-        else:
-            for batch_id in list(PROCESSING_BATCH_IDS):
-                logger.info(f"stopping batch {batch_id}")
-                PROCESSING_BATCH_IDS.pop(batch_id, None)
+        _apply_master_assignment(
+            root_batch_ids + proofs_batch_ids,
+            stale_only=bool(stale) and not (root_batch_ids or proofs_batch_ids),
+        )
         _mark_idle_if_quiet()
-        local_busy = bool(PENDING_BATCH_IDS or PROCESSING_BATCH_IDS or READY_BATCH_IDS)
+        local_busy = bool(
+            PENDING_BATCH_IDS or PROCESSING_BATCH_IDS or READY_BATCH_IDS or _DRAINING
+        )
         sleep_s = BUSY_POLL_SEC if local_busy else IDLE_POLL_SEC
     else:
         logger.error(f"status {resp.status_code} when fetching batch: {resp.text}")
@@ -1097,9 +1364,11 @@ def main():
     print(f"  TTL: {ttl}")
     print(f"  Workers: {num_workers}")
     print(f"  Idle poll: {IDLE_POLL_SEC}s  Busy poll: {BUSY_POLL_SEC}s")
+    print(f"  Stop empty polls: {STOP_EMPTY_POLLS}")
     print(f"  Dashboard: http://{DASHBOARD_HOST}:{DASHBOARD_PORT}")
 
     os.makedirs(algorithms_dir, exist_ok=True)
+    _reap_orphan_runtimes("startup")
     _start_dashboard_server(num_workers)
     if _is_gpu_slave():
         Thread(target=_gpu_telem_loop, name="gpu-telem", daemon=True).start()

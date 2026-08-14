@@ -74,7 +74,12 @@ If you already run stock `tig-benchmarker`, you can still copy `main.py` + `dash
 
 ## Version
 
-See `VERSION` (currently `0.1.10`). Reported to the master as `innopool-slave/<VERSION>` from the packaged file — no `.env` override.
+See `VERSION` (currently `0.1.11`). Reported to the master as `innopool-slave/<VERSION>` from the packaged file — no `.env` override.
+
+Stopping a batch kills `tig-runtime` / `tig-verifier` inside the challenge
+container (not just the host `docker exec` client) and the slave stays
+`running` until those processes are gone. A single empty `/get-batches` no
+longer abandons in-flight work.
 
 Missing challenge containers are reported to the master as infrastructure errors (so the
 assignment is released) instead of silently re-queuing while the slave keeps heartbeating.
