@@ -237,10 +237,9 @@ def _display_state(current) -> str:
         processing = bool(PROCESSING_BATCH_IDS)
         pending = bool(PENDING_BATCH_IDS)
         ready = bool(READY_BATCH_IDS)
-        draining = bool(_DRAINING)
     if downloading:
         return "downloading"
-    if processing or draining:
+    if processing:
         return "running"
     if current:
         done = int(current.get("nonces_done") or 0)
@@ -357,7 +356,6 @@ def _mark_idle_if_quiet():
             or PROCESSING_BATCH_IDS
             or READY_BATCH_IDS
             or _DOWNLOADING
-            or _DRAINING
         )
         if busy:
             return
@@ -371,7 +369,7 @@ def _runtime_state() -> str:
             return "downloading"
         if READY_BATCH_IDS:
             return "submitting"
-        if PROCESSING_BATCH_IDS or PENDING_BATCH_IDS or _DRAINING:
+        if PROCESSING_BATCH_IDS or PENDING_BATCH_IDS:
             return "running"
         return "idle"
 
@@ -498,7 +496,7 @@ def _collect_host_telemetry(num_workers: int, *, query_gpu: bool = True) -> dict
         "num_workers": max(1, int(num_workers)),
         "slave_version": SLAVE_VERSION,
         "state": _runtime_state(),
-        "active_batches": len(PROCESSING_BATCH_IDS) + len(_DRAINING),
+        "active_batches": len(PROCESSING_BATCH_IDS),
         "pending_batches": len(PENDING_BATCH_IDS),
         "last_idle_ms": _last_idle_ms(),
     }
@@ -695,12 +693,26 @@ def _challenge_has_runtimes(challenge, rand_hash=None) -> bool:
     return bool(_signal_container_runtimes(challenge, sig=None, rand_hash=rand_hash))
 
 
+def _challenge_has_live_batch(challenge) -> bool:
+    return any(
+        ((job.get("batch") or {}).get("challenge") == challenge)
+        for job in PROCESSING_BATCH_IDS.values()
+    )
+
+
 def _reap_draining() -> bool:
-    """Finish leftover container runtimes; return True if any are still alive."""
+    """Finish leftover container runtimes; return True if any are still alive.
+
+    Do not signal a container that still has a live batch. Broadcast TERM/KILL
+    was exiting new nonces with 137 while leftovers from a previous job lingered.
+    """
     with _RUNTIME_LOCK:
         items = list(_DRAINING.items())
     still = {}
     for challenge, started in items:
+        if _challenge_has_live_batch(challenge):
+            still[challenge] = started
+            continue
         age = now() - started
         sig = "KILL" if age >= 400 else "TERM"
         _signal_container_runtimes(challenge, sig)

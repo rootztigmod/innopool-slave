@@ -43,7 +43,7 @@ class RuntimeStopTests(unittest.TestCase):
         self.assertNotIn("vehicle_routing", slave._managed_challenges())
 
     @patch.object(slave, "_signal_container_runtimes", return_value=["11"])
-    def test_stop_batch_marks_draining_and_stays_running(self, _signal):
+    def test_stop_batch_marks_draining_but_reports_idle(self, _signal):
         slave.PROCESSING_BATCH_IDS["b1"] = {
             "batch": {
                 "id": "b1",
@@ -59,9 +59,25 @@ class RuntimeStopTests(unittest.TestCase):
         slave._stop_batch("b1", "test")
         self.assertNotIn("b1", slave.PROCESSING_BATCH_IDS)
         self.assertIn("vehicle_routing", slave._DRAINING)
-        self.assertEqual(slave._runtime_state(), "running")
+        self.assertEqual(slave._runtime_state(), "idle")
+        self.assertEqual(slave._collect_host_telemetry(8, query_gpu=False)["active_batches"], 0)
         slave._mark_idle_if_quiet()
-        self.assertIsNone(slave._IDLE_SINCE_MS)
+        self.assertIsNotNone(slave._IDLE_SINCE_MS)
+
+    @patch.object(slave, "_challenge_has_runtimes", return_value=True)
+    @patch.object(slave, "_signal_container_runtimes", return_value=["11"])
+    def test_reap_does_not_kill_live_challenge(self, signal, _has):
+        slave._DRAINING["knapsack"] = slave.now() - 60_000
+        slave.PROCESSING_BATCH_IDS["live"] = {
+            "batch": {"id": "live", "challenge": "knapsack", "rand_hash": "x", "settings": {}},
+            "finished": set(),
+            "start": 1,
+        }
+        self.assertTrue(slave._reap_draining())
+        signal.assert_not_called()
+        self.assertIn("knapsack", slave._DRAINING)
+        self.assertEqual(slave._runtime_state(), "running")
+        self.assertEqual(slave._collect_host_telemetry(8, query_gpu=False)["active_batches"], 1)
 
     @patch.object(slave, "_signal_container_runtimes", return_value=[])
     def test_empty_assign_keeps_inflight(self, _signal):
