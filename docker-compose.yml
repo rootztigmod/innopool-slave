@@ -17,7 +17,9 @@ services:
       - NUM_WORKERS=${NUM_WORKERS}
       - DASHBOARD_PORT=8787
       - DASHBOARD_HOST=0.0.0.0
-    restart: unless-stopped
+    # Do not auto-start on host reboot. A crash can leave a torn overlay;
+    # install.sh systemd pulls images and force-recreates before work starts.
+    restart: "no"
 
   # CPU challenge runtimes (pool-cpu-*)
   satisfiability:
@@ -27,7 +29,9 @@ services:
       - ${ALGORITHMS_DIR}:/app/algorithms
       - ${RESULTS_DIR}:/app/results
     command: ["sleep", "infinity"]
-    restart: unless-stopped
+    # Do not auto-start on host reboot. A crash can leave a torn overlay;
+    # install.sh systemd pulls images and force-recreates before work starts.
+    restart: "no"
 
   vehicle_routing:
     image: ghcr.io/tig-foundation/tig-monorepo/vehicle_routing/runtime:${TIG_VERSION}
@@ -36,7 +40,9 @@ services:
       - ${ALGORITHMS_DIR}:/app/algorithms
       - ${RESULTS_DIR}:/app/results
     command: ["sleep", "infinity"]
-    restart: unless-stopped
+    # Do not auto-start on host reboot. A crash can leave a torn overlay;
+    # install.sh systemd pulls images and force-recreates before work starts.
+    restart: "no"
 
   knapsack:
     image: ghcr.io/tig-foundation/tig-monorepo/knapsack/runtime:${TIG_VERSION}
@@ -45,7 +51,9 @@ services:
       - ${ALGORITHMS_DIR}:/app/algorithms
       - ${RESULTS_DIR}:/app/results
     command: ["sleep", "infinity"]
-    restart: unless-stopped
+    # Do not auto-start on host reboot. A crash can leave a torn overlay;
+    # install.sh systemd pulls images and force-recreates before work starts.
+    restart: "no"
 
   job_scheduling:
     image: ghcr.io/tig-foundation/tig-monorepo/job_scheduling/runtime:${TIG_VERSION}
@@ -54,7 +62,9 @@ services:
       - ${ALGORITHMS_DIR}:/app/algorithms
       - ${RESULTS_DIR}:/app/results
     command: ["sleep", "infinity"]
-    restart: unless-stopped
+    # Do not auto-start on host reboot. A crash can leave a torn overlay;
+    # install.sh systemd pulls images and force-recreates before work starts.
+    restart: "no"
 
   energy_arbitrage:
     image: ghcr.io/tig-foundation/tig-monorepo/energy_arbitrage/runtime:${TIG_VERSION}
@@ -63,7 +73,9 @@ services:
       - ${ALGORITHMS_DIR}:/app/algorithms
       - ${RESULTS_DIR}:/app/results
     command: ["sleep", "infinity"]
-    restart: unless-stopped
+    # Do not auto-start on host reboot. A crash can leave a torn overlay;
+    # install.sh systemd pulls images and force-recreates before work starts.
+    restart: "no"
 
   # GPU challenge runtimes (pool-gpu-*) — require NVIDIA Container Toolkit
   vector_search:
@@ -74,7 +86,9 @@ services:
       - ${ALGORITHMS_DIR}:/app/algorithms
       - ${RESULTS_DIR}:/app/results
     command: ["sleep", "infinity"]
-    restart: unless-stopped
+    # Do not auto-start on host reboot. A crash can leave a torn overlay;
+    # install.sh systemd pulls images and force-recreates before work starts.
+    restart: "no"
 
   hypergraph:
     image: ghcr.io/tig-foundation/tig-monorepo/hypergraph/runtime:${TIG_VERSION}
@@ -84,7 +98,9 @@ services:
       - ${ALGORITHMS_DIR}:/app/algorithms
       - ${RESULTS_DIR}:/app/results
     command: ["sleep", "infinity"]
-    restart: unless-stopped
+    # Do not auto-start on host reboot. A crash can leave a torn overlay;
+    # install.sh systemd pulls images and force-recreates before work starts.
+    restart: "no"
 
   neuralnet_optimizer:
     image: ghcr.io/tig-foundation/tig-monorepo/neuralnet_optimizer/runtime:${TIG_VERSION}
@@ -94,4 +110,6 @@ services:
       - ${ALGORITHMS_DIR}:/app/algorithms
       - ${RESULTS_DIR}:/app/results
     command: ["sleep", "infinity"]
-    restart: unless-stopped
+    # Do not auto-start on host reboot. A crash can leave a torn overlay;
+    # install.sh systemd pulls images and force-recreates before work starts.
+    restart: "no"
