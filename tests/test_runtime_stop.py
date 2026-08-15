@@ -32,7 +32,13 @@ class RuntimeStopTests(unittest.TestCase):
         self.assertTrue(slave._cmdline_is_runtime(cmd, "abcdef123"))
         self.assertFalse(slave._cmdline_is_runtime(cmd, "otherhash"))
         self.assertTrue(slave._cmdline_is_runtime("tig-verifier abcdef123 7 /tmp/7.json", "abcdef123"))
+        self.assertTrue(slave._cmdline_is_runtime("/usr/local/bin/tig-runtime abcdef123 7"))
         self.assertFalse(slave._cmdline_is_runtime("sleep infinity"))
+        self.assertFalse(
+            slave._cmdline_is_runtime(
+                "sh -c for d in /proc/[0-9]*; do case $cmd in *tig-runtime*) ;; esac; done"
+            )
+        )
 
     def test_cpu_slave_does_not_reap_gpu_containers(self):
         slave._SLAVE_NAME = "pool-cpu-test"
@@ -111,15 +117,16 @@ class RuntimeStopTests(unittest.TestCase):
         self.assertEqual(slave._DRAINING, {})
 
     @patch.object(slave, "_signal_container_runtimes", return_value=[])
-    def test_omitted_batch_stops_immediately(self, _signal):
+    def test_omitted_batch_keeps_inflight(self, _signal):
         slave.PROCESSING_BATCH_IDS["old"] = {
             "batch": {"id": "old", "challenge": "energy_arbitrage", "rand_hash": "x", "settings": {}},
             "finished": set(),
             "start": 1,
         }
         slave._apply_master_assignment(["new"], stale_only=False)
-        self.assertNotIn("old", slave.PROCESSING_BATCH_IDS)
-        self.assertIn("energy_arbitrage", slave._DRAINING)
+        self.assertIn("old", slave.PROCESSING_BATCH_IDS)
+        self.assertEqual(slave._DRAINING, {})
+        _signal.assert_not_called()
 
     def test_stopped_batch_is_not_live(self):
         slave.PROCESSING_BATCH_IDS["b1"] = {"batch": {"id": "b1"}}

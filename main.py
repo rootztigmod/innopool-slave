@@ -561,7 +561,14 @@ def _managed_challenges():
 
 
 def _cmdline_is_runtime(cmd: str, rand_hash=None) -> bool:
-    if "tig-runtime" not in cmd and "tig-verifier" not in cmd:
+    """True only when argv0 is tig-runtime / tig-verifier.
+
+    Substring match is wrong: the leftover inspector is
+    `sh -c '... tig-runtime ...'`, so it matched itself on empty boxes.
+    """
+    exe = (cmd or "").split(None, 1)[0] if cmd else ""
+    exe = exe.rsplit("/", 1)[-1]
+    if exe not in ("tig-runtime", "tig-verifier"):
         return False
     if rand_hash and rand_hash not in cmd:
         return False
@@ -640,12 +647,16 @@ def _docker_exec_sh(challenge, script, env=None, timeout=5):
 _CONTAINER_RUNTIME_SCRIPT = r"""
 sig="${KILL_SIG:-}"
 hash="${KILL_HASH:-}"
+self=$$
 for d in /proc/[0-9]*; do
   pid=${d#/proc/}
+  [ "$pid" = "$self" ] && continue
   [ -r "$d/cmdline" ] || continue
   cmd=$(tr '\0' ' ' < "$d/cmdline" 2>/dev/null) || continue
-  case "$cmd" in
-    *tig-runtime*|*tig-verifier*) ;;
+  exe=${cmd%% *}
+  exe=${exe##*/}
+  case "$exe" in
+    tig-runtime|tig-verifier) ;;
     *) continue ;;
   esac
   if [ -n "$hash" ]; then
@@ -772,21 +783,24 @@ def _stop_batch(batch_id, reason):
 
 
 def _apply_master_assignment(live_ids, *, stale_only=False):
-    """Revoke local PROCESSING only when master hands a different live set.
+    """Do not treat /get-batches as a full assignment snapshot.
 
-    An empty /get-batches (underfed pool, load-shed, ghosts) must not kill
-    in-flight work. That produced 9–14s STOPPED rows across AWS/Pica: two
-    empty polls and the slave abandoned a batch it still owed.
+    Master returns a capped concurrent slice, not every batch this slave
+    already owns. Empty polls and shrinks (16 → 1) used to SIGKILL live
+    nonces (137 / 143 / EBADF). Keep in-flight work; only accept new IDs.
     """
     global _EMPTY_REVOKE_STREAK
     live_ids = set(live_ids or ())
-    if live_ids:
-        _EMPTY_REVOKE_STREAK = 0
-        for batch_id in set(PROCESSING_BATCH_IDS) - live_ids:
-            _stop_batch(batch_id, "master omitted")
-        return
     _EMPTY_REVOKE_STREAK = 0
-    if PROCESSING_BATCH_IDS:
+    omitted = sorted(set(PROCESSING_BATCH_IDS) - live_ids)
+    if omitted and live_ids:
+        logger.info(
+            "master listed %s live; keeping in-flight %s",
+            sorted(live_ids),
+            omitted,
+        )
+        return
+    if not live_ids and PROCESSING_BATCH_IDS:
         logger.warning(
             "master returned no live batches%s; keeping in-flight %s",
             " (already-submitted ghosts)" if stale_only else "",
