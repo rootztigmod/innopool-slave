@@ -4,9 +4,11 @@
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+for _name in ("randomname", "requests", "blake3"):
+    sys.modules.setdefault(_name, MagicMock())
 
 import main as slave  # noqa: E402
 
@@ -103,6 +105,14 @@ class RuntimeStopTests(unittest.TestCase):
         slave._apply_master_assignment(["new"], stale_only=False)
         self.assertNotIn("old", slave.PROCESSING_BATCH_IDS)
         self.assertIn("energy_arbitrage", slave._DRAINING)
+
+    def test_stopped_batch_is_not_live(self):
+        slave.PROCESSING_BATCH_IDS["b1"] = {"batch": {"id": "b1"}}
+        self.assertTrue(slave._batch_is_live("b1"))
+        slave._STOPPED_BATCH_IDS["b1"] = slave.now()
+        self.assertFalse(slave._batch_is_live("b1"))
+        slave.PROCESSING_BATCH_IDS.pop("b1", None)
+        self.assertFalse(slave._batch_is_live("b1"))
 
     @patch.object(slave, "_challenge_has_runtimes", return_value=False)
     @patch.object(slave, "_signal_container_runtimes", return_value=[])

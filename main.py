@@ -823,7 +823,12 @@ def download_library(algorithms_dir, batch):
     return so_path, ptx_path
 
 
-def run_tig_runtime(nonce, batch, so_path, ptx_path, results_dir):
+def _batch_is_live(batch_id) -> bool:
+    return batch_id in PROCESSING_BATCH_IDS and not _is_stopped_batch(batch_id)
+
+
+def run_tig_runtime(nonce, batch, so_path, ptx_path, results_dir) -> bool:
+    """Run one nonce. True if a result file was written; False if the batch was stopped."""
     output_dir = f"{results_dir}/{batch['id']}"
     output_file = f"{output_dir}/{nonce}.json"
     settings = json.dumps(batch["settings"], separators=(",", ":"))
@@ -844,18 +849,22 @@ def run_tig_runtime(nonce, batch, so_path, ptx_path, results_dir):
     if ptx_path is not None:
         cmd += ["--ptx", ptx_path]
     logger.debug("computing nonce: %s", " ".join(cmd[:4] + [f"'{cmd[4]}'"] + cmd[5:]))
-    if batch["id"] not in PROCESSING_BATCH_IDS or _is_stopped_batch(batch["id"]):
+    if not _batch_is_live(batch["id"]):
         logger.debug("skip nonce %s; batch %s already stopped", nonce, batch["id"])
-        return
+        return False
     process = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
     )
     _register_runtime_proc(batch["id"], process)
+    completed = False
     try:
         while True:
             try:
                 _, stderr = process.communicate(timeout=0.1)
                 ret = process.returncode
+                if not _batch_is_live(batch["id"]):
+                    logger.info("stopped container runtime batch %s nonce %s", batch["id"], nonce)
+                    return False
                 if not os.path.exists(output_file):
                     if ret == 0:
                         raise Exception("no output")
@@ -873,16 +882,18 @@ def run_tig_runtime(nonce, batch, so_path, ptx_path, results_dir):
                     cmd += ["--ptx", ptx_path]
                 logger.debug("verifying nonce: %s", " ".join(cmd[:4] + [f"'{cmd[4]}'"] + cmd[5:]))
                 ret = subprocess.run(cmd, capture_output=True, text=True)
+                if not _batch_is_live(batch["id"]):
+                    return False
                 if ret.returncode != 0:
                     raise Exception(
                         f"invalid solution (exit code: {ret.returncode}, stderr: {ret.stderr.strip()})"
                     )
 
-                last_line = ret.stdout.strip().splitlines()[-1]
-                if not last_line.startswith("quality: "):
+                last_line = (ret.stdout or "").strip().splitlines()
+                if not last_line or not last_line[-1].startswith("quality: "):
                     raise Exception("failed to find quality in tig-verifier output")
                 try:
-                    quality = int(last_line[len("quality: "):])
+                    quality = int(last_line[-1][len("quality: "):])
                 except Exception:
                     raise Exception("failed to parse quality from tig-verifier output")
                 logger.debug(f"batch {batch['id']}, nonce {nonce} valid solution with quality {quality}")
@@ -891,9 +902,10 @@ def run_tig_runtime(nonce, batch, so_path, ptx_path, results_dir):
                     d["quality"] = quality
                 with open(output_file, "w") as f:
                     json.dump(d, f)
+                completed = True
                 break
             except subprocess.TimeoutExpired:
-                if batch["id"] not in PROCESSING_BATCH_IDS or _is_stopped_batch(batch["id"]):
+                if not _batch_is_live(batch["id"]):
                     _kill_popen(process)
                     _signal_container_runtimes(
                         batch.get("challenge"),
@@ -901,11 +913,12 @@ def run_tig_runtime(nonce, batch, so_path, ptx_path, results_dir):
                         batch.get("rand_hash"),
                     )
                     logger.info("stopped container runtime batch %s nonce %s", batch["id"], nonce)
-                    break
+                    return False
     finally:
         _forget_runtime_proc(batch["id"], process)
 
     logger.debug(f"batch {batch['id']}, nonce {nonce} finished, took {now() - start}ms")
+    return completed
 
 
 def compute_merkle_roots(results_dir):
@@ -1176,7 +1189,9 @@ def process_nonces(results_dir):
         batch=batch,
     )
     try:
-        run_tig_runtime(nonce, batch, so_path, ptx_path, results_dir)
+        completed = run_tig_runtime(nonce, batch, so_path, ptx_path, results_dir)
+        if not completed:
+            return
         job["finished"].add(nonce)
         in_flight = batch["num_nonces"] - len(job["finished"]) - q.qsize()
         _status_update_progress(
