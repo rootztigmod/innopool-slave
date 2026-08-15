@@ -64,7 +64,7 @@ class RuntimeStopTests(unittest.TestCase):
         self.assertIsNone(slave._IDLE_SINCE_MS)
 
     @patch.object(slave, "_signal_container_runtimes", return_value=[])
-    def test_empty_assign_needs_two_polls(self, _signal):
+    def test_empty_assign_keeps_inflight(self, _signal):
         slave.PROCESSING_BATCH_IDS["b1"] = {
             "batch": {
                 "id": "b1",
@@ -78,11 +78,10 @@ class RuntimeStopTests(unittest.TestCase):
             "start": 1,
         }
         slave._apply_master_assignment([], stale_only=False)
-        self.assertIn("b1", slave.PROCESSING_BATCH_IDS)
-        self.assertEqual(slave._EMPTY_REVOKE_STREAK, 1)
         slave._apply_master_assignment([], stale_only=False)
-        self.assertNotIn("b1", slave.PROCESSING_BATCH_IDS)
-        self.assertIn("satisfiability", slave._DRAINING)
+        slave._apply_master_assignment([], stale_only=False)
+        self.assertIn("b1", slave.PROCESSING_BATCH_IDS)
+        self.assertEqual(slave._DRAINING, {})
 
     @patch.object(slave, "_signal_container_runtimes", return_value=[])
     def test_stale_only_keeps_inflight(self, _signal):

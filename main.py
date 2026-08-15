@@ -760,7 +760,12 @@ def _stop_batch(batch_id, reason):
 
 
 def _apply_master_assignment(live_ids, *, stale_only=False):
-    """Revoke local PROCESSING the master no longer owns."""
+    """Revoke local PROCESSING only when master hands a different live set.
+
+    An empty /get-batches (underfed pool, load-shed, ghosts) must not kill
+    in-flight work. That produced 9–14s STOPPED rows across AWS/Pica: two
+    empty polls and the slave abandoned a batch it still owed.
+    """
     global _EMPTY_REVOKE_STREAK
     live_ids = set(live_ids or ())
     if live_ids:
@@ -768,28 +773,13 @@ def _apply_master_assignment(live_ids, *, stale_only=False):
         for batch_id in set(PROCESSING_BATCH_IDS) - live_ids:
             _stop_batch(batch_id, "master omitted")
         return
-    if stale_only and PROCESSING_BATCH_IDS:
-        _EMPTY_REVOKE_STREAK = 0
+    _EMPTY_REVOKE_STREAK = 0
+    if PROCESSING_BATCH_IDS:
         logger.warning(
-            "master returned only already-submitted batches; keeping in-flight %s",
+            "master returned no live batches%s; keeping in-flight %s",
+            " (already-submitted ghosts)" if stale_only else "",
             sorted(PROCESSING_BATCH_IDS),
         )
-        return
-    if not PROCESSING_BATCH_IDS:
-        _EMPTY_REVOKE_STREAK = 0
-        return
-    _EMPTY_REVOKE_STREAK += 1
-    if _EMPTY_REVOKE_STREAK >= STOP_EMPTY_POLLS:
-        for batch_id in list(PROCESSING_BATCH_IDS):
-            _stop_batch(batch_id, "master empty")
-        _EMPTY_REVOKE_STREAK = 0
-        return
-    logger.warning(
-        "master returned no batches (%s/%s); keeping in-flight %s",
-        _EMPTY_REVOKE_STREAK,
-        STOP_EMPTY_POLLS,
-        sorted(PROCESSING_BATCH_IDS),
-    )
 
 
 def download_library(algorithms_dir, batch):
