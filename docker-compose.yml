@@ -2,6 +2,8 @@ services:
   slave:
     build: .
     image: innopool-slave:local
+    # Built from this repo. Do not pull innopool-slave from Docker Hub.
+    pull_policy: build
     ports:
       - "${DASHBOARD_HOST_PORT:-8787}:8787"
     volumes:
