@@ -1452,9 +1452,11 @@ def send_audit_leaves(headers, master_ip, master_port):
             _mark_audit_sent(batch_id, key)
             with _AUDIT_LOCK:
                 PENDING_AUDITS.pop(key, None)
-        elif resp.status_code in (400, 403):
-            # Malformed or not ours — retrying will not help. Keep the archive.
-            logger.error("audit: master rejected leaves for %s: %s %s", key, resp.status_code, resp.text)
+        elif resp.status_code in (400, 403, 413):
+            # Malformed, not ours, or too big for the pool's proxy — retrying
+            # will not help. Keep the archive; the master can still fetch it.
+            detail = resp.text if resp.status_code != 413 else f"payload {len(json.dumps(body))} bytes over the pool's upload limit"
+            logger.error("audit: master rejected leaves for %s: %s %s", key, resp.status_code, detail)
             _mark_audit_sent(batch_id, key)
             with _AUDIT_LOCK:
                 PENDING_AUDITS.pop(key, None)
