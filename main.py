@@ -116,6 +116,7 @@ _IDLE_SINCE_MS = None
 _POLL_WAKE = Event()
 _RUNTIME_LOCK = Lock()
 _RUNTIME_PROCS = {}  # batch_id -> [Popen, ...]
+_PAUSED = False
 _STOPPED_BATCH_IDS = {}  # batch_id -> stopped_ms
 _DRAINING = {}  # challenge -> drain_started_ms
 _EMPTY_REVOKE_STREAK = 0
@@ -405,13 +406,58 @@ def _mark_idle_if_quiet():
 
 def _runtime_state() -> str:
     with _STATE_LOCK:
+        if _PAUSED and not _RUNTIME_PROCS:
+            return "paused"
         if _DOWNLOADING > 0:
             return "downloading"
         if READY_BATCH_IDS:
             return "submitting"
         if PROCESSING_BATCH_IDS or PENDING_BATCH_IDS:
             return "running"
+        if _PAUSED:
+            return "paused"
         return "idle"
+
+
+def _apply_master_control(value) -> None:
+    global _PAUSED
+    command = str(value or "").strip().lower()
+    if command not in {"pause", "resume"}:
+        return
+    want = command == "pause"
+    if want == _PAUSED:
+        return
+    _PAUSED = want
+    logger.info("master control %s", command)
+
+
+def _work_report(num_workers: int) -> dict:
+    """Live nonce processes and how many nonces each batch still has queued."""
+    parts = []
+    running = 0
+    with _RUNTIME_LOCK:
+        for batch_id, procs in list(_RUNTIME_PROCS.items()):
+            live = [proc for proc in procs if proc.poll() is None]
+            job = PROCESSING_BATCH_IDS.get(batch_id) or {}
+            batch = job.get("batch") or {}
+            queued = 0
+            q = job.get("q")
+            if q is not None:
+                try:
+                    queued = int(q.qsize())
+                except Exception:
+                    queued = 0
+            running += len(live)
+            parts.append(
+                f"{batch_id}:{len(live)}:{queued}:{int(batch.get('num_nonces') or 0)}"
+            )
+    workers = max(1, int(num_workers))
+    return {
+        "workers_running": running,
+        "workers_idle": max(0, workers - running),
+        "paused": 1 if _PAUSED else 0,
+        "batches": ";".join(parts),
+    }
 
 
 def _last_idle_ms() -> int:
@@ -540,6 +586,7 @@ def _collect_host_telemetry(num_workers: int, *, query_gpu: bool = True) -> dict
         "pending_batches": len(PENDING_BATCH_IDS),
         "last_idle_ms": _last_idle_ms(),
     }
+    telem.update(_work_report(num_workers))
     try:
         telem["load_1m"] = float(os.getloadavg()[0])
     except (AttributeError, OSError):
@@ -583,6 +630,10 @@ def _telemetry_headers(telem: dict) -> dict:
         "pending_batches": "X-InnoPool-Pending-Batches",
         "last_idle_ms": "X-InnoPool-Last-Idle-Ms",
         "slave_version": "X-InnoPool-Slave-Version",
+        "workers_running": "X-InnoPool-Workers-Running",
+        "workers_idle": "X-InnoPool-Workers-Idle",
+        "paused": "X-InnoPool-Paused",
+        "batches": "X-InnoPool-Batches",
     }
     headers = {}
     for key, header in mapping.items():
@@ -1623,6 +1674,11 @@ def process_batch(algorithms_dir, results_dir):
         time.sleep(1)
         return
 
+    if _PAUSED:
+        PENDING_BATCH_IDS.add(batch_id)
+        time.sleep(1)
+        return
+
     if batch_id in PROCESSING_BATCH_IDS or batch_id in READY_BATCH_IDS:
         return
 
@@ -1689,6 +1745,9 @@ def process_batch(algorithms_dir, results_dir):
 
 
 def process_nonces(results_dir):
+    if _PAUSED:
+        time.sleep(0.5)
+        return
     for batch_id in list(PROCESSING_BATCH_IDS):
         job = PROCESSING_BATCH_IDS[batch_id]
         q = job["q"]
@@ -1804,6 +1863,7 @@ def poll_batches(headers, master_ip, master_port, results_dir, num_workers):
 
     if resp.status_code == 200:
         batches = resp.json()
+        _apply_master_control(resp.headers.get("X-InnoPool-Control"))
         # Master may ask for archived leaves (TIG report). Header so that
         # older slaves, which only read the body, are unaffected.
         try:
